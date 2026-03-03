@@ -42,7 +42,7 @@ cuda = [
     "quack-kernels",
 ]
 rocm = [
-    "aiter",
+    "amd-aiter",
 ]
 dev = [
     "pytest>=6.0",

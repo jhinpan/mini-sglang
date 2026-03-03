@@ -54,7 +54,9 @@ class RotaryEmbedding(StateLessOP):
         sin = cos_sin[:, half_dim:]
 
         def _rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> None:
-            # x shape: (num_tokens, num_heads, head_size)
+            # x may be 2D (num_tokens, num_heads * head_size) or 3D (num_tokens, num_heads, head_size)
+            if x.dim() == 2:
+                x = x.view(x.shape[0], -1, self.head_size)
             num_tokens, num_heads, _ = x.shape
             cos_expand = cos[:, None, :].expand(num_tokens, num_heads, half_dim)
             sin_expand = sin[:, None, :].expand(num_tokens, num_heads, half_dim)

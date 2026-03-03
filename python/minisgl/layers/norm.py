@@ -8,9 +8,10 @@ from .base import BaseOP
 
 
 def _rmsnorm_pytorch(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    orig_dtype = x.dtype
     variance = x.to(torch.float32).pow(2).mean(dim=-1, keepdim=True)
     x = x * torch.rsqrt(variance + eps)
-    return (x * weight).to(x.dtype)
+    return (x * weight).to(orig_dtype)
 
 
 def _fused_add_rmsnorm_pytorch(

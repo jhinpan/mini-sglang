@@ -111,14 +111,26 @@ class Engine:
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:
         if config.tp_info.size == 1 or config.use_pynccl:
-            torch.distributed.init_process_group(
-                backend="gloo",
-                rank=config.tp_info.rank,
-                world_size=config.tp_info.size,
-                timeout=timedelta(seconds=config.distributed_timeout),
-                init_method=config.distributed_addr,
-            )
-            tp_cpu_group = torch.distributed.group.WORLD
+            # On ROCm with TP>1, _TorchDistributedPyNCCL wraps torch.distributed.all_reduce
+            # on GPU tensors, so we need nccl (RCCL) backend instead of gloo.
+            if is_hip() and config.tp_info.size > 1:
+                torch.distributed.init_process_group(
+                    backend="nccl",
+                    rank=config.tp_info.rank,
+                    world_size=config.tp_info.size,
+                    timeout=timedelta(seconds=config.distributed_timeout),
+                    init_method=config.distributed_addr,
+                )
+                tp_cpu_group = torch.distributed.new_group(backend="gloo")
+            else:
+                torch.distributed.init_process_group(
+                    backend="gloo",
+                    rank=config.tp_info.rank,
+                    world_size=config.tp_info.size,
+                    timeout=timedelta(seconds=config.distributed_timeout),
+                    init_method=config.distributed_addr,
+                )
+                tp_cpu_group = torch.distributed.group.WORLD
             assert tp_cpu_group is not None
             max_bytes = (
                 config.max_forward_len * config.model_config.hidden_size * self.dtype.itemsize
@@ -236,6 +248,7 @@ def _adjust_config(config: EngineConfig):
     if "trtllm" in config.attention_backend and config.page_size not in [16, 32, 64]:
         override("page_size", 64)
         logger.warning_rank0("Page size is overridden to 64 for TRTLLM backend")
+
 
     if config.model_config.is_moe and config.moe_backend == "auto":
         override("moe_backend", "fused")

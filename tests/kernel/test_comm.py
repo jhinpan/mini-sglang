@@ -5,7 +5,7 @@ from minisgl.distributed import set_tp_info
 import minisgl.kernel as kernel
 from tqdm import tqdm
 
-from minisgl.utils import init_logger
+from minisgl.utils import init_logger, is_hip
 
 
 logger = init_logger(__name__)
@@ -18,15 +18,22 @@ def run(tp_size: int, tp_rank: int):
     stream = torch.cuda.current_stream()
     set_tp_info(tp_rank, tp_size)
 
-    # cpu group
-    torch.distributed.init_process_group(
-        world_size=tp_size,
-        rank=tp_rank,
-        backend="gloo",
-    )
-
-    # use default cpu group
-    tp_cpu_group = torch.distributed.group.WORLD
+    # On ROCm, _TorchDistributedPyNCCL wraps torch.distributed.all_reduce on GPU tensors,
+    # so we need nccl (RCCL) backend instead of gloo for performance.
+    if is_hip():
+        torch.distributed.init_process_group(
+            world_size=tp_size,
+            rank=tp_rank,
+            backend="nccl",
+        )
+        tp_cpu_group = torch.distributed.new_group(backend="gloo")
+    else:
+        torch.distributed.init_process_group(
+            world_size=tp_size,
+            rank=tp_rank,
+            backend="gloo",
+        )
+        tp_cpu_group = torch.distributed.group.WORLD
     assert tp_cpu_group is not None, "CPU group should not be None"
     dtype = torch.float16
 

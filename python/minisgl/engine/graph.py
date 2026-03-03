@@ -58,7 +58,7 @@ def _determine_cuda_graph_bs(
     free_memory_gb = free_memory / (1 << 30)
     if cuda_graph_max_bs is None:
         if is_hip():
-            cuda_graph_max_bs = 128  # conservative for AMD MI300X
+            cuda_graph_max_bs = 64  # conservative for AMD MI300X (SDPA gathers KV)
         elif free_memory_gb > 80:  # H200
             cuda_graph_max_bs = 256
         else:
