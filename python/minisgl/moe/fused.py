@@ -4,6 +4,69 @@ from typing import Dict, Tuple
 import torch
 from minisgl.moe import BaseMoeBackend
 from minisgl.utils import div_ceil
+from minisgl.utils.arch import is_hip
+
+
+def _fused_topk_pytorch(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_token_non_padded: torch.Tensor | None = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
+    scores = torch.softmax(gating_output.float(), dim=-1)
+    topk_weights, topk_ids = torch.topk(scores, topk, dim=-1)
+    topk_weights = topk_weights.to(torch.float32)
+    topk_ids = topk_ids.to(torch.int32)
+    if renormalize:
+        topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + 1e-8)
+    if num_token_non_padded is not None:
+        indices = torch.arange(0, topk_ids.shape[0], device=topk_ids.device)
+        topk_ids[indices >= num_token_non_padded, :] = -1
+    return topk_weights, topk_ids
+
+
+def _moe_align_block_size_pytorch(
+    topk_ids: torch.Tensor, block_size: int, num_experts: int
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_total_experts = num_experts + 1  # includes padding expert
+    total_tokens = topk_ids.numel()
+    flat_ids = topk_ids.view(-1)
+
+    # Count tokens per expert
+    tokens_per_expert = torch.zeros(num_total_experts, dtype=torch.int32, device=topk_ids.device)
+    for e in range(num_total_experts):
+        tokens_per_expert[e] = (flat_ids == e).sum().to(torch.int32)
+
+    # Pad each expert's count to block_size
+    padded_per_expert = ((tokens_per_expert + block_size - 1) // block_size) * block_size
+    total_padded = int(padded_per_expert.sum().item())
+
+    sorted_token_ids = torch.full(
+        (total_padded,), total_tokens, dtype=torch.int32, device=topk_ids.device
+    )
+    expert_ids_out = torch.empty(
+        total_padded // block_size, dtype=torch.int32, device=topk_ids.device
+    )
+
+    offset = 0
+    for e in range(num_total_experts):
+        count = int(tokens_per_expert[e].item())
+        padded = int(padded_per_expert[e].item())
+        if padded == 0:
+            continue
+        # Find token indices assigned to this expert
+        mask = flat_ids == e
+        token_indices = torch.nonzero(mask, as_tuple=False).squeeze(-1).to(torch.int32)
+        sorted_token_ids[offset : offset + count] = token_indices
+        # Fill expert_ids for blocks
+        num_blocks = padded // block_size
+        expert_ids_out[offset // block_size : offset // block_size + num_blocks] = e
+        offset += padded
+
+    num_tokens_post_pad = torch.tensor([total_padded], dtype=torch.int32, device=topk_ids.device)
+    return sorted_token_ids, expert_ids_out, num_tokens_post_pad
 
 
 def fused_topk(
@@ -13,6 +76,11 @@ def fused_topk(
     renormalize: bool,
     num_token_non_padded: torch.Tensor | None = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    if is_hip():
+        return _fused_topk_pytorch(
+            hidden_states, gating_output, topk, renormalize, num_token_non_padded
+        )
+
     from sgl_kernel import topk_softmax
 
     assert hidden_states.shape[0] == gating_output.shape[0], "Number of tokens mismatch"
@@ -68,6 +136,9 @@ def moe_align_block_size(
     - The padding ensures that the total number of tokens is now divisible
         by block_size for proper block matrix operations.
     """
+    if is_hip():
+        return _moe_align_block_size_pytorch(topk_ids, block_size, num_experts)
+
     from sgl_kernel import moe_align_block_size as sgl_moe_align_block_size
 
     max_num_tokens_padded = topk_ids.numel() + (num_experts + 1) * (block_size - 1)

@@ -1,6 +1,7 @@
 from typing import Any, Dict
 
 import torch
+from minisgl.utils.arch import is_hip
 
 
 def fused_moe_kernel_triton(
@@ -76,7 +77,9 @@ def moe_sum_reduce_triton(input: torch.Tensor, output: torch.Tensor) -> None:
     BLOCK_M = 1
     BLOCK_DIM = 2048
     NUM_STAGE = 1
-    num_warps = 8
+    # AMD uses 64-thread wavefronts vs NVIDIA's 32-thread warps;
+    # use 4 warps on AMD to maintain same parallelism as 8 warps on NVIDIA
+    num_warps = 4 if is_hip() else 8
 
     grid = (
         triton.cdiv(token_num, BLOCK_M),

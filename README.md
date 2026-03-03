@@ -24,7 +24,7 @@ Mini-SGLang is a compact implementation of [SGLang](https://github.com/sgl-proje
 
 ## 🚀 Quick Start
 
-> **⚠️ Platform Support**: Mini-SGLang currently supports **Linux only** (x86_64 and aarch64). Windows and macOS are not supported due to dependencies on Linux-specific CUDA kernels (`sgl-kernel`, `flashinfer`). We recommend using [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows or Docker for cross-platform compatibility.
+> **⚠️ Platform Support**: Mini-SGLang currently supports **Linux only** (x86_64 and aarch64). Windows and macOS are not supported due to dependencies on Linux-specific GPU kernels. We recommend using [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) on Windows or Docker for cross-platform compatibility.
 
 ### 1. Environment Setup
 
@@ -36,7 +36,9 @@ uv venv --python=3.12
 source .venv/bin/activate
 ```
 
-**Prerequisites**: Mini-SGLang relies on CUDA kernels that are JIT-compiled. Ensure you have the **NVIDIA CUDA Toolkit** installed and that its version matches your driver's version. You can check your driver's CUDA capability with `nvidia-smi`.
+**Prerequisites (NVIDIA)**: Mini-SGLang relies on CUDA kernels that are JIT-compiled. Ensure you have the **NVIDIA CUDA Toolkit** installed and that its version matches your driver's version. You can check your driver's CUDA capability with `nvidia-smi`.
+
+**Prerequisites (AMD)**: For AMD MI300X GPUs, ensure you have **ROCm 6.x** installed. Check your setup with `rocm-smi`.
 
 ### 2. Installation
 
@@ -45,7 +47,12 @@ Install Mini-SGLang directly from the source:
 ```bash
 git clone https://github.com/sgl-project/mini-sglang.git
 cd mini-sglang && uv venv --python=3.12 && source .venv/bin/activate
-uv pip install -e .
+
+# For NVIDIA GPUs:
+uv pip install -e ".[cuda]"
+
+# For AMD GPUs (ROCm):
+uv pip install -e ".[rocm]"
 ```
 
 <details>
@@ -106,6 +113,32 @@ Since Mini-SGLang requires Linux-specific dependencies, Windows users should use
        -v tvm_cache:/app/.cache/tvm-ffi \
        -v flashinfer_cache:/app/.cache/flashinfer \
        minisgl --model Qwen/Qwen3-0.6B --host 0.0.0.0
+   ```
+
+</details>
+
+<details>
+<summary><b>🐳 Running with Docker (AMD/ROCm)</b></summary>
+
+**Prerequisites**:
+- [Docker](https://docs.docker.com/get-docker/)
+- [ROCm 6.x](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/)
+
+1. **Build the Docker image**:
+   ```bash
+   docker build -f Dockerfile.rocm -t minisgl:rocm .
+   ```
+
+2. **Run the server**:
+   ```bash
+   docker run --device=/dev/kfd --device=/dev/dri -p 1919:1919 \
+       minisgl:rocm --model Qwen/Qwen3-0.6B --host 0.0.0.0
+   ```
+
+3. **Run in interactive shell mode**:
+   ```bash
+   docker run -it --device=/dev/kfd --device=/dev/dri \
+       minisgl:rocm --model Qwen/Qwen3-0.6B --shell
    ```
 
 </details>
@@ -179,6 +212,22 @@ python3 -m sglang.launch_server --model "Qwen/Qwen3-32B" --tp 4 \
 > ```
 
 ![online](https://lmsys.org/images/blog/minisgl/online.png)
+
+## AMD/ROCm Support
+
+Mini-SGLang supports AMD MI300X GPUs via ROCm. The AMD code path uses:
+
+- **AITER** attention backend (replaces FlashAttention/sgl_kernel)
+- **PyTorch fallbacks** for NVIDIA-specific kernels (FlashInfer activations, RMSNorm, RoPE, sampling)
+- **Triton kernels** for MoE (work natively on AMD via Triton's ROCm support)
+- **RCCL** for multi-GPU communication (via `torch.distributed`)
+
+**Key differences from NVIDIA path**:
+- Kernel operations use PyTorch implementations instead of custom CUDA/FlashInfer kernels
+- CUDA graphs are supported via HIP graph API with conservative batch sizes (max 128)
+- `num_warps` is adjusted for AMD's 64-thread wavefronts (4 warps vs 8 on NVIDIA)
+
+**Installation**: `pip install -e ".[rocm]"` (or `pip install minisgl[rocm]`)
 
 ## 📚 Learn More
 

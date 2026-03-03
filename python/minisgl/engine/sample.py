@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, List
 
 import torch
 from minisgl.utils import is_sm90_supported, nvtx_annotate
+from minisgl.utils.arch import is_hip
 
 if TYPE_CHECKING:
     from minisgl.core import Batch
@@ -21,12 +22,51 @@ def make_device_tensor(data: List, dtype: torch.dtype, device: torch.device) -> 
     return torch.tensor(data, dtype=dtype, pin_memory=True).to(device, non_blocking=True)
 
 
+def _sample_impl_pytorch(
+    logits: torch.Tensor,
+    temperatures: torch.Tensor,
+    top_k: torch.Tensor | int | None,
+    top_p: torch.Tensor | float | None,
+) -> torch.Tensor:
+    scaled = logits / temperatures.unsqueeze(-1)
+
+    if top_k is not None:
+        if isinstance(top_k, torch.Tensor):
+            # Per-token top-k: use the minimum top_k across the batch for simplicity
+            k = int(top_k.min().item())
+        else:
+            k = top_k
+        if k > 0 and k < scaled.shape[-1]:
+            topk_vals, _ = torch.topk(scaled, k, dim=-1)
+            threshold = topk_vals[:, -1].unsqueeze(-1)
+            scaled = scaled.masked_fill(scaled < threshold, float("-inf"))
+
+    probs = torch.softmax(scaled, dim=-1)
+
+    if top_p is not None:
+        if isinstance(top_p, torch.Tensor):
+            p_vals = top_p
+        else:
+            p_vals = torch.full((probs.shape[0],), top_p, device=probs.device)
+        sorted_probs, sorted_indices = torch.sort(probs, dim=-1, descending=True)
+        cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+        mask = cumulative_probs - sorted_probs > p_vals.unsqueeze(-1)
+        sorted_probs[mask] = 0.0
+        sorted_probs.div_(sorted_probs.sum(dim=-1, keepdim=True))
+        probs.scatter_(1, sorted_indices, sorted_probs)
+
+    return torch.multinomial(probs, num_samples=1).squeeze(-1)
+
+
 def sample_impl(
     logits: torch.Tensor,
     temperatures: torch.Tensor,
     top_k: torch.Tensor | int | None,
     top_p: torch.Tensor | float | None,
 ) -> torch.Tensor:
+    if is_hip():
+        return _sample_impl_pytorch(logits, temperatures, top_k, top_p)
+
     import flashinfer.sampling as sampling
 
     probs = sampling.softmax(logits, temperatures, enable_pdl=is_sm90_supported())
@@ -69,7 +109,6 @@ class Sampler:
 
     @nvtx_annotate("Sampler")
     def sample(self, logits: torch.Tensor, args: BatchSamplingArgs) -> torch.Tensor:
-        with torch.cuda.nvtx.range("Sampler"):
-            if args.temperatures is None:  # greedy sampling
-                return torch.argmax(logits, dim=-1)
-            return sample_impl(logits.float(), args.temperatures, args.top_k, args.top_p)
+        if args.temperatures is None:  # greedy sampling
+            return torch.argmax(logits, dim=-1)
+        return sample_impl(logits.float(), args.temperatures, args.top_k, args.top_p)

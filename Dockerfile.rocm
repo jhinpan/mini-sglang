@@ -1,0 +1,70 @@
+ARG ROCM_VERSION=6.3
+ARG UBUNTU_VERSION=22.04
+ARG PYTHON_VERSION=3.12
+
+# Build stage
+FROM rocm/dev-ubuntu-${UBUNTU_VERSION}:${ROCM_VERSION} AS builder
+
+ARG PYTHON_VERSION
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-dev \
+    python${PYTHON_VERSION}-venv \
+    python3-pip \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv package manager
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+WORKDIR /app
+
+# Copy all source files (editable install requires source to exist)
+COPY pyproject.toml ./
+COPY python/ ./python/
+
+# Create venv and install dependencies with ROCm extras
+RUN uv venv --python=python${PYTHON_VERSION} /app/.venv \
+    && . /app/.venv/bin/activate \
+    && uv pip install -e ".[rocm]"
+
+# Runtime stage
+FROM rocm/dev-ubuntu-${UBUNTU_VERSION}:${ROCM_VERSION} AS runtime
+
+ARG PYTHON_VERSION
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd --create-home --shell /bin/bash --uid 1001 minisgl
+
+# Copy application from builder
+COPY --from=builder --chown=minisgl:minisgl /app /app
+
+# Create cache directories
+RUN mkdir -p /app/.cache/huggingface /app/.cache/tvm-ffi \
+    && chown -R minisgl:minisgl /app/.cache
+
+WORKDIR /app
+
+# Environment configuration
+ENV ROCM_HOME=/opt/rocm
+ENV PATH="${ROCM_HOME}/bin:/app/.venv/bin:${PATH}"
+ENV LD_LIBRARY_PATH="${ROCM_HOME}/lib:${LD_LIBRARY_PATH}"
+ENV PYTHONUNBUFFERED=1
+
+# Set up cache directories
+ENV HF_HOME=/app/.cache/huggingface
+ENV TVM_FFI_CACHE_DIR=/app/.cache/tvm-ffi
+
+USER minisgl
+
+EXPOSE 1919
+
+ENTRYPOINT ["python", "-m", "minisgl"]
+CMD ["--help"]

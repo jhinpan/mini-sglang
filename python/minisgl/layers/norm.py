@@ -2,32 +2,61 @@ from typing import Tuple
 
 import torch
 
+from minisgl.utils.arch import is_hip
+
 from .base import BaseOP
+
+
+def _rmsnorm_pytorch(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    variance = x.to(torch.float32).pow(2).mean(dim=-1, keepdim=True)
+    x = x * torch.rsqrt(variance + eps)
+    return (x * weight).to(x.dtype)
+
+
+def _fused_add_rmsnorm_pytorch(
+    x: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, eps: float
+) -> None:
+    x += residual
+    residual.copy_(x)
+    variance = x.to(torch.float32).pow(2).mean(dim=-1, keepdim=True)
+    x_normed = x * torch.rsqrt(variance + eps)
+    x.copy_((x_normed * weight).to(x.dtype))
 
 
 class RMSNorm(BaseOP):
     def __init__(self, size: int, eps: float) -> None:
-        from flashinfer import rmsnorm
-
         self.eps = eps
         self.weight = torch.empty(size)
-        self.rmsnorm = rmsnorm
+        if is_hip():
+            self.rmsnorm = _rmsnorm_pytorch
+        else:
+            from flashinfer import rmsnorm
+
+            self.rmsnorm = rmsnorm
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.rmsnorm(x, self.weight, self.eps)
 
     def forward_inplace(self, x: torch.Tensor) -> None:
-        self.rmsnorm(x, self.weight, self.eps, out=x)
+        if is_hip():
+            result = self.rmsnorm(x, self.weight, self.eps)
+            x.copy_(result)
+        else:
+            self.rmsnorm(x, self.weight, self.eps, out=x)
 
 
 class RMSNormFused(BaseOP):
     def __init__(self, size: int, eps: float) -> None:
-        from flashinfer import fused_add_rmsnorm, rmsnorm
-
         self.eps = eps
         self.weight = torch.empty(size)
-        self.rmsnorm = rmsnorm
-        self.fused_add_rmsnorm = fused_add_rmsnorm
+        if is_hip():
+            self.rmsnorm = _rmsnorm_pytorch
+            self.fused_add_rmsnorm = _fused_add_rmsnorm_pytorch
+        else:
+            from flashinfer import fused_add_rmsnorm, rmsnorm
+
+            self.rmsnorm = rmsnorm
+            self.fused_add_rmsnorm = fused_add_rmsnorm
 
     def forward(
         self, x: torch.Tensor, residual: torch.Tensor | None = None

@@ -5,12 +5,46 @@ from typing import Tuple
 
 
 @functools.cache
+def is_hip() -> bool:
+    """Check if running on AMD ROCm (HIP) platform."""
+    import torch
+
+    return hasattr(torch.version, "hip") and torch.version.hip is not None
+
+
+@functools.cache
+def is_cuda() -> bool:
+    """Check if running on NVIDIA CUDA platform (not HIP)."""
+    import torch
+
+    return torch.cuda.is_available() and not is_hip()
+
+
+def is_cuda_alike() -> bool:
+    """Check if running on any CUDA-compatible platform (NVIDIA or AMD ROCm)."""
+    return is_cuda() or is_hip()
+
+
+@functools.cache
+def is_gfx942() -> bool:
+    """Check if running on AMD MI300X (gfx942) GPU."""
+    if not is_hip():
+        return False
+    import torch
+
+    props = torch.cuda.get_device_properties(0)
+    return "gfx942" in getattr(props, "gcnArchName", "")
+
+
+@functools.cache
 def _get_torch_cuda_version() -> Tuple[int, int] | None:
     import torch
     import torch.version
 
     if not torch.cuda.is_available() or not torch.version.cuda:
         return None
+    if is_hip():
+        return None  # SM capabilities are NVIDIA-only
     return torch.cuda.get_device_capability()
 
 

@@ -18,8 +18,11 @@ class RotaryEmbedding(StateLessOP):
         base: float,
         post_process: None | Callable[[torch.Tensor], torch.Tensor] = None,
     ) -> None:
+        from minisgl.utils.arch import is_hip
+
         super().__init__()
         self.head_size = head_size
+        self._is_hip = is_hip()
         assert rotary_dim == head_size
         inv_freq = 1.0 / (base ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
         if post_process is not None:
@@ -32,9 +35,38 @@ class RotaryEmbedding(StateLessOP):
         self._cos_sin_cache = torch.cat((cos, sin), dim=-1)
         assert self.head_size in [64, 128, 256, 512]
 
-        from flashinfer import apply_rope_with_cos_sin_cache_inplace
+        if not self._is_hip:
+            from flashinfer import apply_rope_with_cos_sin_cache_inplace
 
-        self.apply_rope_with_cos_sin_cache_inplace = apply_rope_with_cos_sin_cache_inplace
+            self.apply_rope_with_cos_sin_cache_inplace = apply_rope_with_cos_sin_cache_inplace
+
+    def _apply_rope_pytorch(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor,
+    ) -> None:
+        # AMD uses int64 positions for RoPE compatibility (following SGLang)
+        positions = positions.to(torch.int64)
+        cos_sin = self._cos_sin_cache[positions]
+        half_dim = self.head_size // 2
+        cos = cos_sin[:, :half_dim]
+        sin = cos_sin[:, half_dim:]
+
+        def _rotate(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> None:
+            # x shape: (num_tokens, num_heads, head_size)
+            num_tokens, num_heads, _ = x.shape
+            cos_expand = cos[:, None, :].expand(num_tokens, num_heads, half_dim)
+            sin_expand = sin[:, None, :].expand(num_tokens, num_heads, half_dim)
+            x1 = x[..., :half_dim]
+            x2 = x[..., half_dim:]
+            r1 = x1 * cos_expand - x2 * sin_expand
+            r2 = x2 * cos_expand + x1 * sin_expand
+            x[..., :half_dim] = r1
+            x[..., half_dim:] = r2
+
+        _rotate(query, cos, sin)
+        _rotate(key, cos, sin)
 
     def forward(
         self,
@@ -42,13 +74,16 @@ class RotaryEmbedding(StateLessOP):
         query: torch.Tensor,
         key: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        self.apply_rope_with_cos_sin_cache_inplace(
-            positions=positions,
-            query=query,
-            key=key,
-            head_size=self.head_size,
-            cos_sin_cache=self._cos_sin_cache,
-        )
+        if self._is_hip:
+            self._apply_rope_pytorch(positions, query, key)
+        else:
+            self.apply_rope_with_cos_sin_cache_inplace(
+                positions=positions,
+                query=query,
+                key=key,
+                head_size=self.head_size,
+                cos_sin_cache=self._cos_sin_cache,
+            )
         return query, key
 
 

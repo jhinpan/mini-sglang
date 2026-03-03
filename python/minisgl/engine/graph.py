@@ -8,6 +8,7 @@ import torch
 from minisgl.core import Batch, Req, get_global_ctx
 from minisgl.distributed import get_tp_info
 from minisgl.utils import init_logger
+from minisgl.utils.arch import is_hip
 from tqdm import tqdm
 
 if TYPE_CHECKING:
@@ -56,7 +57,9 @@ def _determine_cuda_graph_bs(
 
     free_memory_gb = free_memory / (1 << 30)
     if cuda_graph_max_bs is None:
-        if free_memory_gb > 80:  # H200
+        if is_hip():
+            cuda_graph_max_bs = 128  # conservative for AMD MI300X
+        elif free_memory_gb > 80:  # H200
             cuda_graph_max_bs = 256
         else:
             cuda_graph_max_bs = 160
