@@ -23,9 +23,9 @@ def _indexing_pytorch(
         adjusted_indices = (indices - start).clamp(0, length - 1)
         if output is None:
             output = weights.new_zeros(indices.shape[0], weights.shape[1])
-        result = weights[adjusted_indices]
-        output[valid_mask] = result[valid_mask]
-        output[~valid_mask] = 0
+        else:
+            output.zero_()
+        output[valid_mask] = weights[adjusted_indices[valid_mask]]
         return output
     if output is None:
         output = weights[indices]

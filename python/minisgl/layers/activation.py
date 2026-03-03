@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from minisgl.utils.arch import is_hip
 
@@ -8,26 +8,13 @@ if TYPE_CHECKING:
     import torch
 
 
-def _silu_and_mul_pytorch(x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
-    import torch.nn.functional as F
-
+def _activation_and_mul_pytorch(
+    activation_fn: Callable, x: torch.Tensor, out: torch.Tensor | None = None
+) -> torch.Tensor:
     d = x.shape[-1] // 2
     gate = x[..., :d]
     up = x[..., d:]
-    result = F.silu(gate) * up
-    if out is not None:
-        out.copy_(result)
-        return out
-    return result
-
-
-def _gelu_and_mul_pytorch(x: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
-    import torch.nn.functional as F
-
-    d = x.shape[-1] // 2
-    gate = x[..., :d]
-    up = x[..., d:]
-    result = F.gelu(gate) * up
+    result = activation_fn(gate) * up
     if out is not None:
         out.copy_(result)
         return out
@@ -36,7 +23,9 @@ def _gelu_and_mul_pytorch(x: torch.Tensor, out: torch.Tensor | None = None) -> t
 
 def silu_and_mul(x: torch.Tensor, out: torch.Tensor | None = None):
     if is_hip():
-        return _silu_and_mul_pytorch(x, out=out)
+        import torch.nn.functional as F
+
+        return _activation_and_mul_pytorch(F.silu, x, out=out)
     from flashinfer import silu_and_mul
 
     return silu_and_mul(x, out=out)
@@ -44,7 +33,9 @@ def silu_and_mul(x: torch.Tensor, out: torch.Tensor | None = None):
 
 def gelu_and_mul(x: torch.Tensor, out: torch.Tensor | None = None):
     if is_hip():
-        return _gelu_and_mul_pytorch(x, out=out)
+        import torch.nn.functional as F
+
+        return _activation_and_mul_pytorch(F.gelu, x, out=out)
     from flashinfer import gelu_and_mul
 
     return gelu_and_mul(x, out=out)

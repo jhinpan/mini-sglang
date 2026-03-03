@@ -47,8 +47,6 @@ class AITERBackend(BaseAttnBackend):
         self.max_graph_bs = 0
         self.capture_bs: List[int] = []
         self.scale = config.head_dim**-0.5
-        self.num_qo_heads = config.num_qo_heads
-        self.num_kv_heads = config.num_kv_heads
 
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, layer_id: int, batch: Batch
@@ -80,8 +78,6 @@ class AITERBackend(BaseAttnBackend):
                 cu_seqlens_q=metadata.cu_seqlens_q,
                 page_size=self.page_size,
                 softmax_scale=self.scale,
-                num_qo_heads=self.num_qo_heads,
-                num_kv_heads=self.num_kv_heads,
             )
 
     def prepare_metadata(self, batch: Batch) -> None:
@@ -217,11 +213,13 @@ def _sdpa_prefill(
     cu_seqlens_q: torch.Tensor,
     page_size: int,
     softmax_scale: float,
-    num_qo_heads: int,
-    num_kv_heads: int,
 ) -> torch.Tensor:
-    """SDPA-based prefill attention. Processes each sequence individually."""
-    head_dim = q.shape[2]
+    """SDPA-based prefill attention. Processes each sequence individually.
+
+    Note: This uses a Python loop over batch sequences because each sequence
+    may have different q_len/k_len, preventing batched SDPA. This is acceptable
+    for prefill (not the decode hot path).
+    """
     batch_size = page_table.shape[0]
 
     # Flatten paged cache for token-level indexing
@@ -229,21 +227,25 @@ def _sdpa_prefill(
     k_flat = k_cache.reshape(num_pages * ps, kv_heads, hd)
     v_flat = v_cache.reshape(num_pages * ps, kv_heads, hd)
 
+    # Move to CPU once to avoid per-element GPU-CPU sync in the loop
+    cu_seqlens_q_cpu = cu_seqlens_q.cpu()
+    cache_seqlens_cpu = cache_seqlens.cpu()
+    offsets = torch.arange(page_size, device=q.device)
+
     outputs = []
     for i in range(batch_size):
-        q_start = cu_seqlens_q[i].item()
-        q_end = cu_seqlens_q[i + 1].item()
+        q_start = cu_seqlens_q_cpu[i].item()
+        q_end = cu_seqlens_q_cpu[i + 1].item()
         q_len = q_end - q_start
         if q_len == 0:
             continue
 
         q_seq = q[q_start:q_end]  # (q_len, num_qo_heads, head_dim)
-        k_len = cache_seqlens[i].item()
+        k_len = cache_seqlens_cpu[i].item()
 
         # Get token indices from page table
         num_pages_needed = (k_len + page_size - 1) // page_size
         page_indices = page_table[i, :num_pages_needed]
-        offsets = torch.arange(page_size, device=q.device)
         token_indices = (page_indices.unsqueeze(-1) * page_size + offsets).reshape(-1)[:k_len]
 
         k_seq = k_flat[token_indices]  # (k_len, kv_heads, head_dim)
@@ -257,11 +259,11 @@ def _sdpa_prefill(
         # For prefill: use causal mask when q_len == k_len (full prefill)
         is_causal = q_len == k_len
         if not is_causal and q_len > 1:
-            # Extend prefill with partial cache hit
-            attn_mask = torch.ones(q_len, k_len, device=q.device, dtype=torch.bool)
+            # Extend prefill with partial cache hit -- vectorized mask construction
             q_offset = k_len - q_len
-            for qi in range(q_len):
-                attn_mask[qi, q_offset + qi + 1 :] = False
+            q_indices = torch.arange(q_len, device=q.device)
+            k_indices = torch.arange(k_len, device=q.device)
+            attn_mask = k_indices.unsqueeze(0) <= (q_offset + q_indices).unsqueeze(1)
             attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)
         else:
             attn_mask = None

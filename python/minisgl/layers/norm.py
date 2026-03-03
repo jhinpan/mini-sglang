@@ -7,11 +7,18 @@ from minisgl.utils.arch import is_hip
 from .base import BaseOP
 
 
-def _rmsnorm_pytorch(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+def _rmsnorm_pytorch(
+    x: torch.Tensor, weight: torch.Tensor, eps: float, out: torch.Tensor | None = None
+) -> torch.Tensor:
     orig_dtype = x.dtype
-    variance = x.to(torch.float32).pow(2).mean(dim=-1, keepdim=True)
-    x = x * torch.rsqrt(variance + eps)
-    return (x * weight).to(orig_dtype)
+    x_float = x.to(torch.float32)
+    variance = x_float.pow(2).mean(dim=-1, keepdim=True)
+    x_normed = x_float * torch.rsqrt(variance + eps)
+    result = (x_normed * weight).to(orig_dtype)
+    if out is not None:
+        out.copy_(result)
+        return out
+    return result
 
 
 def _fused_add_rmsnorm_pytorch(
@@ -19,8 +26,9 @@ def _fused_add_rmsnorm_pytorch(
 ) -> None:
     x += residual
     residual.copy_(x)
-    variance = x.to(torch.float32).pow(2).mean(dim=-1, keepdim=True)
-    x_normed = x * torch.rsqrt(variance + eps)
+    x_float = x.to(torch.float32)
+    variance = x_float.pow(2).mean(dim=-1, keepdim=True)
+    x_normed = x_float * torch.rsqrt(variance + eps)
     x.copy_((x_normed * weight).to(x.dtype))
 
 
@@ -39,11 +47,7 @@ class RMSNorm(BaseOP):
         return self.rmsnorm(x, self.weight, self.eps)
 
     def forward_inplace(self, x: torch.Tensor) -> None:
-        if is_hip():
-            result = self.rmsnorm(x, self.weight, self.eps)
-            x.copy_(result)
-        else:
-            self.rmsnorm(x, self.weight, self.eps, out=x)
+        self.rmsnorm(x, self.weight, self.eps, out=x)
 
 
 class RMSNormFused(BaseOP):

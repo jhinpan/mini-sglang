@@ -34,10 +34,10 @@ def _moe_align_block_size_pytorch(
     total_tokens = topk_ids.numel()
     flat_ids = topk_ids.view(-1)
 
-    # Count tokens per expert
-    tokens_per_expert = torch.zeros(num_total_experts, dtype=torch.int32, device=topk_ids.device)
-    for e in range(num_total_experts):
-        tokens_per_expert[e] = (flat_ids == e).sum().to(torch.int32)
+    # Count tokens per expert using bincount (single kernel instead of per-expert loop)
+    # Clamp negative values (padding sentinel -1) to num_experts (the padding expert slot)
+    clamped_ids = flat_ids.clamp(min=0, max=num_total_experts - 1)
+    tokens_per_expert = torch.bincount(clamped_ids, minlength=num_total_experts).to(torch.int32)
 
     # Pad each expert's count to block_size
     padded_per_expert = ((tokens_per_expert + block_size - 1) // block_size) * block_size
@@ -50,20 +50,29 @@ def _moe_align_block_size_pytorch(
         total_padded // block_size, dtype=torch.int32, device=topk_ids.device
     )
 
+    # Sort token indices by expert assignment (single argsort instead of per-expert nonzero)
+    sorted_order = torch.argsort(clamped_ids, stable=True)
+    # Move counts to CPU to avoid per-expert GPU-CPU sync
+    tokens_per_expert_cpu = tokens_per_expert.cpu()
+    padded_per_expert_cpu = padded_per_expert.cpu()
+
     offset = 0
+    token_offset = 0
     for e in range(num_total_experts):
-        count = int(tokens_per_expert[e].item())
-        padded = int(padded_per_expert[e].item())
+        count = int(tokens_per_expert_cpu[e].item())
+        padded = int(padded_per_expert_cpu[e].item())
         if padded == 0:
+            token_offset += count
             continue
-        # Find token indices assigned to this expert
-        mask = flat_ids == e
-        token_indices = torch.nonzero(mask, as_tuple=False).squeeze(-1).to(torch.int32)
-        sorted_token_ids[offset : offset + count] = token_indices
+        # Slice the pre-sorted indices for this expert
+        sorted_token_ids[offset : offset + count] = sorted_order[
+            token_offset : token_offset + count
+        ].to(torch.int32)
         # Fill expert_ids for blocks
         num_blocks = padded // block_size
         expert_ids_out[offset // block_size : offset // block_size + num_blocks] = e
         offset += padded
+        token_offset += count
 
     num_tokens_post_pad = torch.tensor([total_padded], dtype=torch.int32, device=topk_ids.device)
     return sorted_token_ids, expert_ids_out, num_tokens_post_pad
